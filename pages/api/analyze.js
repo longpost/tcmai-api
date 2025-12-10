@@ -1,6 +1,18 @@
 // pages/api/analyze.js
 
 export default function handler(req, res) {
+  // ==== CORS 处理 ====
+  // 允许所有来源访问，你以后也可以限制为指定域名
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // 预检请求（OPTIONS）直接放行
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  // 只允许 POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Only POST allowed" });
   }
@@ -18,11 +30,11 @@ export default function handler(req, res) {
     });
   }
 
-  // symptoms 的格式：[{ region: "upper_abdomen", symptom: "胃脘胀痛" }, ...]
+  // symptoms 形如 [{ region: "upper_abdomen", symptom: "胃脘胀痛" }, ...]
   const names = symptoms.map(s => s.symptom);
   const has = (s) => names.includes(s);
 
-  // === 示例规则 1：胸闷 + 心悸 + 气短 ===
+  // ===== 示例规则 1：胸闷 + 心悸 + 气短 =====
   if (has("胸闷") && has("心悸") && (has("气短懒言") || has("气短"))) {
     return res.status(200).json({
       title: "示例辨证 1",
@@ -38,7 +50,7 @@ export default function handler(req, res) {
     });
   }
 
-  // === 示例规则 2：胃脘胀痛 + 嗳气 + 反酸 ===
+  // ===== 示例规则 2：胃脘胀痛 + 嗳气 + 反酸 =====
   if (has("胃脘胀痛") && has("嗳气") && has("反酸")) {
     return res.status(200).json({
       title: "示例辨证 2",
@@ -55,7 +67,7 @@ export default function handler(req, res) {
     });
   }
 
-  // === 示例规则 3：小腹冷痛 + 痛经 + 小腹坠胀 / 经行腹痛 ===
+  // ===== 示例规则 3：小腹冷痛 + 痛经 + 小腹坠胀 / 经行腹痛 =====
   if (has("小腹冷痛") && has("痛经") && (has("小腹坠胀") || has("经行腹痛"))) {
     return res.status(200).json({
       title: "示例辨证 3",
@@ -72,7 +84,7 @@ export default function handler(req, res) {
     });
   }
 
-  // === 默认：兜底提示 ===
+  // ===== 默认兜底 =====
   return res.status(200).json({
     title: "简单学习提示",
     pattern: "所选症状可从多种证候角度考虑",
