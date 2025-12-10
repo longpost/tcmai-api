@@ -117,34 +117,37 @@ export default async function handler(req, res) {
 }
 
 // 把 AI 生成的学习说明附加到结果上
+// 把 AI 生成的说明附加到结果上（版本 A：有经验中医对病人解释）
 async function attachAINotes(baseResult, symptoms) {
-  // 如果没配 API Key，就直接返回原结果
+  // 如果没配 API Key，就返回一个明确提示
   if (!process.env.OPENAI_API_KEY) {
-    return baseResult;
+    return {
+      ...baseResult,
+      aiError: "后端未配置 OPENAI_API_KEY，AI 学习说明暂不可用。"
+    };
   }
 
   try {
-    const symptomText = JSON.stringify(symptoms, null, 2);
+    const names = (symptoms || [])
+      .map((s) => s && s.symptom)
+      .filter(Boolean);
+    const mainSymptoms = names.length ? names.join("、") : "（前端选择的症状）";
 
     const prompt = `
-你是一名负责给中医学生讲解的老师，只能做“学习性的分析”，不能做真实诊断和处方。
+你是一位有多年临床经验的中医师兼针灸师，现在是在向一位普通患者解释：“为什么他/她的这些症状，从中医角度可以这样理解”。语气要温和、稳重、简洁。
 
-学生输入了一些按身体部位整理的症状，你面前还有一个“系统根据规则初步匹配出的示意性证候信息”。
+请根据下面信息，用不超过 180 字的简体中文，写一段对病人说的话：
+- 症状：${mainSymptoms}
+- 系统推断的中医证候方向（仅作参考）：${baseResult.pattern}
+- 系统的辨证思路要点（仅作参考）：${baseResult.explanation}
 
-请你在不改变原始结论基调的前提下，用简体中文写一段【学习说明】，要求：
-1）面向中医学生，用通俗但专业的语言，逻辑清楚。
-2）解释这些症状为什么可以从这个证候角度考虑，可以顺带点一下病因病机思路。
-3）可以提示哪些“还需要进一步询问或望舌切脉”的要点（比如寒热、虚实等），但不要写具体诊断结论。
-4）不要给具体药方名和剂量，不要给“可以服用XX药”之类的医嘱，只能说“方药思路上可从疏肝理气、和胃降逆等角度考虑”这种程度。
-5）结尾再次提醒：本内容仅供中医理论学习使用，不能用于真实诊疗或自行用药。
+要求：
+1）不要下具体诊断，只能说“可能与……有关”“可以从……角度考虑”等。
+2）不要出现具体方剂名和药名，只能提“疏肝理气、健脾和胃、补肾填精、化痰祛湿”等这类原则性说法。
+3）鼓励病人结合舌象、脉象、整体情况，由面诊医师进一步辨证。
+4）结尾必须有一句类似“以上只是中医角度的一般性解释，不能作为诊断或用药依据，如有不适请及时就医”。
 
-下面是系统的基础结果：
-${JSON.stringify(baseResult, null, 2)}
-
-下面是学生勾选的症状列表（按部位）：
-${symptomText}
-
-请你输出一小段不超过 300 字的中文说明，用一段文字即可，不要列表，不要 JSON。
+只输出这一小段说明，不要解释你的思路。
     `.trim();
 
     const response = await client.responses.create({
@@ -165,3 +168,4 @@ ${symptomText}
     };
   }
 }
+
