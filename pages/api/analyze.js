@@ -3,7 +3,7 @@ import OpenAI from "openai";
 
 // 用环境变量里的 API Key 初始化客户端
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.keyfortcm
 });
 
 export default async function handler(req, res) {
