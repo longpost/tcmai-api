@@ -1,58 +1,67 @@
 // pages/api/analyze.js
+import OpenAI from "openai";
 
-export default function handler(req, res) {
+// 用环境变量里的 API Key 初始化客户端
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+export default async function handler(req, res) {
   // ==== CORS 处理 ====
-  // 允许所有来源访问，你以后也可以限制为指定域名
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // 预检请求（OPTIONS）直接放行
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  // 只允许 POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Only POST allowed" });
   }
 
   const { symptoms } = req.body || {};
   if (!Array.isArray(symptoms) || symptoms.length === 0) {
-    return res.status(200).json({
+    const baseResult = {
       title: "没有选择任何症状",
       pattern: "——",
       explanation: "请先在前端页面选择一个或多个部位，并勾选相关症状。",
       principle: "",
       acupuncture: "",
       herbal: "",
-      warning: "本接口仅用于中医学习示例，不能替代临床问诊和医师诊断。"
-    });
+      warning: "本接口仅用于中医理论学习示例，不能替代临床问诊和医师诊断。"
+    };
+    const enriched = await attachAINotes(baseResult, symptoms);
+    return res.status(200).json(enriched);
   }
 
-  // symptoms 形如 [{ region: "upper_abdomen", symptom: "胃脘胀痛" }, ...]
-  const names = symptoms.map(s => s.symptom);
+  const names = symptoms.map((s) => s.symptom);
   const has = (s) => names.includes(s);
+
+  let baseResult;
 
   // ===== 示例规则 1：胸闷 + 心悸 + 气短 =====
   if (has("胸闷") && has("心悸") && (has("气短懒言") || has("气短"))) {
-    return res.status(200).json({
+    baseResult = {
       title: "示例辨证 1",
       pattern: "心气不足、痰浊阻络（示意）",
       explanation:
         "以胸闷、心悸、气短为主要表现，可从心气不足、痰浊内阻之角度思考。需结合舌脉等进一步辨证。",
       principle: "益气养心、理气化痰、通阳宣痹（仅为学习用语）。",
-      acupuncture: "取穴示例：内关、心俞、膻中、足三里、丰隆等，根据具体情况加减。",
+      acupuncture:
+        "取穴示例：内关、心俞、膻中、足三里、丰隆等，根据具体情况加减。",
       herbal:
         "方药思路示例：可参考 甘麦大枣汤 合 温胆汤 / 炙甘草汤 等思路加减，具体配伍须由合格中医师根据体质、舌脉调整。",
       warning:
         "如出现胸痛剧烈、出汗、气促明显等，应及时就医排除急症。本内容仅供中医理论学习参考，不能自行据此用药或延误治疗。"
-    });
+    };
+    const enriched = await attachAINotes(baseResult, symptoms);
+    return res.status(200).json(enriched);
   }
 
   // ===== 示例规则 2：胃脘胀痛 + 嗳气 + 反酸 =====
   if (has("胃脘胀痛") && has("嗳气") && has("反酸")) {
-    return res.status(200).json({
+    baseResult = {
       title: "示例辨证 2",
       pattern: "肝胃不和、胃气上逆（示意）",
       explanation:
@@ -64,12 +73,14 @@ export default function handler(req, res) {
         "方药思路示例：可参考 柴胡疏肝散 合 左金丸 / 香砂平胃散 等思路加减，由中医师根据具体情况调整。",
       warning:
         "持续胃痛、呕血、黑便、体重明显下降等情况需及时到医院检查。本内容仅用于学习演示。"
-    });
+    };
+    const enriched = await attachAINotes(baseResult, symptoms);
+    return res.status(200).json(enriched);
   }
 
   // ===== 示例规则 3：小腹冷痛 + 痛经 + 小腹坠胀 / 经行腹痛 =====
   if (has("小腹冷痛") && has("痛经") && (has("小腹坠胀") || has("经行腹痛"))) {
-    return res.status(200).json({
+    baseResult = {
       title: "示例辨证 3",
       pattern: "寒凝胞宫、气滞血瘀（示意）",
       explanation:
@@ -81,11 +92,13 @@ export default function handler(req, res) {
         "方药思路示例：可参考 温经汤、少腹逐瘀汤 等思路，但需由中医师根据经期、体质具体加减。",
       warning:
         "痛经严重、经量异常（过少或过多）、夹块、备孕等情况，一定要在专业医师指导下处理。切勿自行长期用药。"
-    });
+    };
+    const enriched = await attachAINotes(baseResult, symptoms);
+    return res.status(200).json(enriched);
   }
 
   // ===== 默认兜底 =====
-  return res.status(200).json({
+  baseResult = {
     title: "简单学习提示",
     pattern: "所选症状可从多种证候角度考虑",
     explanation:
@@ -97,5 +110,58 @@ export default function handler(req, res) {
     herbal:
       "方药配伍必须由合格中医师根据个人体质与舌脉脉象综合判定，不能仅凭本系统自动生成。",
     warning: "本接口仅作中医教育演示，不用于具体诊断或处方。任何严重症状需及时就医。"
-  });
+  };
+
+  const enriched = await attachAINotes(baseResult, symptoms);
+  return res.status(200).json(enriched);
+}
+
+// 把 AI 生成的学习说明附加到结果上
+async function attachAINotes(baseResult, symptoms) {
+  // 如果没配 API Key，就直接返回原结果
+  if (!process.env.OPENAI_API_KEY) {
+    return baseResult;
+  }
+
+  try {
+    const symptomText = JSON.stringify(symptoms, null, 2);
+
+    const prompt = `
+你是一名负责给中医学生讲解的老师，只能做“学习性的分析”，不能做真实诊断和处方。
+
+学生输入了一些按身体部位整理的症状，你面前还有一个“系统根据规则初步匹配出的示意性证候信息”。
+
+请你在不改变原始结论基调的前提下，用简体中文写一段【学习说明】，要求：
+1）面向中医学生，用通俗但专业的语言，逻辑清楚。
+2）解释这些症状为什么可以从这个证候角度考虑，可以顺带点一下病因病机思路。
+3）可以提示哪些“还需要进一步询问或望舌切脉”的要点（比如寒热、虚实等），但不要写具体诊断结论。
+4）不要给具体药方名和剂量，不要给“可以服用XX药”之类的医嘱，只能说“方药思路上可从疏肝理气、和胃降逆等角度考虑”这种程度。
+5）结尾再次提醒：本内容仅供中医理论学习使用，不能用于真实诊疗或自行用药。
+
+下面是系统的基础结果：
+${JSON.stringify(baseResult, null, 2)}
+
+下面是学生勾选的症状列表（按部位）：
+${symptomText}
+
+请你输出一小段不超过 300 字的中文说明，用一段文字即可，不要列表，不要 JSON。
+    `.trim();
+
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: prompt
+    });
+
+    const aiText = response.output_text;
+
+    return {
+      ...baseResult,
+      aiNotes: aiText
+    };
+  } catch (err) {
+    return {
+      ...baseResult,
+      aiError: "AI 学习说明生成失败：" + (err?.message || String(err))
+    };
+  }
 }
