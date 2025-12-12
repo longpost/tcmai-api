@@ -1,3 +1,4 @@
+// pages/api/symptoms.js
 import { SYMPTOMS } from "../../lib/data";
 
 export default function handler(req, res) {
@@ -10,14 +11,11 @@ export default function handler(req, res) {
   for (const s of SYMPTOMS || []) {
     for (const r of s.regions || []) {
       if (!regions[r]) regions[r] = [];
-      regions[r].push({
-        id: s.id,
-        zh: s.zh,
-        en: s.en
-      });
+      regions[r].push({ id: s.id, zh: s.zh, en: s.en });
     }
   }
 
+  // sort
   for (const r of Object.keys(regions)) {
     regions[r].sort((a, b) => {
       const A = (lang === "en" ? a.en : a.zh) || "";
