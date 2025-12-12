@@ -1,5 +1,4 @@
-// pages/api/symptoms.js
-import { SYMPTOMS, REGIONS } from "../../lib/data";
+import { SYMPTOMS } from "../../lib/data";
 
 export default function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -7,9 +6,8 @@ export default function handler(req, res) {
   const lang = (req.query?.lang || "zh").toLowerCase() === "en" ? "en" : "zh";
 
   const regions = {};
-  for (const r of REGIONS) regions[r] = [];
 
-  for (const s of SYMPTOMS) {
+  for (const s of SYMPTOMS || []) {
     for (const r of s.regions || []) {
       if (!regions[r]) regions[r] = [];
       regions[r].push({
@@ -20,7 +18,6 @@ export default function handler(req, res) {
     }
   }
 
-  // stable sort by label (current lang)
   for (const r of Object.keys(regions)) {
     regions[r].sort((a, b) => {
       const A = (lang === "en" ? a.en : a.zh) || "";
