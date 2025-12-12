@@ -10,7 +10,7 @@ import {
 
 const client = new OpenAI({
   // 这里用你在 Vercel 环境变量里设的名字，之前你说用 KEYFORTCM
-  apiKey: process.env.KEYFORTCM
+  apiKey: process.env.KEYFORTCM2
 });
 
 export default async function handler(req, res) {
