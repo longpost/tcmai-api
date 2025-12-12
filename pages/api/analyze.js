@@ -1,5 +1,5 @@
 // pages/api/analyze.js
-//new
+//new。 
 
 import OpenAI from "openai";
 import {
