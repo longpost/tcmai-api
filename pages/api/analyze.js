@@ -1,4 +1,4 @@
-// pages/api/analyze.js//
+// pages/api/analyze.js
 import OpenAI from "openai";
 import {
   SYMPTOMS,
@@ -8,21 +8,47 @@ import {
   TAG_TREATMENT
 } from "../../lib/data";
 
+// ✅ key 双兼容：以后你只要保证至少设一个就行
+const OPENAI_KEY = process.env.OPENAI_API_KEY || process.env.KEYFORTCM || "";
+
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: OPENAI_KEY
 });
 
 // ---------------------------
-// Helpers: symptom lookup
+// Helpers
 // ---------------------------
 const symptomById = new Map(SYMPTOMS.map((s) => [s.id, s]));
+const symptomByZh = new Map(SYMPTOMS.map((s) => [s.zh, s]));
+const symptomByEn = new Map(SYMPTOMS.map((s) => [s.en, s]));
 
 function safeStr(x) {
   return typeof x === "string" ? x : "";
 }
-
 function normalizeLang(lang) {
   return (lang || "").toLowerCase() === "en" ? "en" : "zh";
+}
+
+// ✅ 输入兼容：支持 {id} 或 {symptom:"中文名"} 或 {symptom:"English"}
+function normalizeSymptomIds(caseInput) {
+  const symptoms = Array.isArray(caseInput.symptoms) ? caseInput.symptoms : [];
+  const out = [];
+  for (const item of symptoms) {
+    if (!item) continue;
+
+    const id = safeStr(item.id);
+    if (id && symptomById.has(id)) {
+      out.push(id);
+      continue;
+    }
+
+    const s = safeStr(item.symptom);
+    if (s) {
+      const hit = symptomByZh.get(s) || symptomByEn.get(s);
+      if (hit?.id) out.push(hit.id);
+    }
+  }
+  return out;
 }
 
 // ---------------------------
@@ -36,10 +62,8 @@ function analyzeEightPrinciples(caseInput) {
     deficiency: 0, excess: 0
   };
 
-  const symptoms = Array.isArray(caseInput.symptoms) ? caseInput.symptoms : [];
-  const symptomIds = symptoms.map((x) => x && x.id).filter(Boolean);
+  const symptomIds = normalizeSymptomIds(caseInput);
 
-  // symptom-based heuristics
   const add = (k, n, why) => {
     score[k] += n;
     evidence.push(`${why} → ${k} ${n > 0 ? "+" + n : n}`);
@@ -57,13 +81,14 @@ function analyzeEightPrinciples(caseInput) {
   if (symptomIds.includes("five_center_heat")) add("heat", 3, "五心烦热");
   if (symptomIds.includes("restlessness")) add("heat", 1, "烦躁");
   if (symptomIds.includes("flushed_face")) add("heat", 2, "面色潮红");
+  if (symptomIds.includes("palm_sole_heat")) add("heat", 2, "手足心热（偏虚热）");
 
-  // Interior vs exterior (we use duration + GI/urine clues; can expand later)
+  // Interior vs exterior (very coarse; you can expand with wind-cold/heat symptoms later)
   const duration = safeStr(caseInput.context?.duration);
   if (duration === "acute") add("exterior", 1, "急性病程");
   if (duration === "chronic") add("interior", 2, "慢性病程");
 
-  const interiorClues = ["epigastric_distension_pain","abdominal_distension","abdominal_pain","constipation","loose_stool","short_red_urine","clear_long_urine"];
+  const interiorClues = ["constipation","loose_stool","short_red_urine","clear_long_urine"];
   if (symptomIds.some((x) => interiorClues.includes(x))) add("interior", 2, "消化/二便相关症状");
 
   // Deficiency vs excess
@@ -116,12 +141,10 @@ function analyzeEightPrinciples(caseInput) {
   if (pulseShape === "thin") add("deficiency", 2, "脉细（偏虚）");
   if (pulseShape === "slippery") add("excess", 1, "脉滑（痰湿偏实）");
 
-  // decide tendencies
   const coldHeat = score.heat - score.cold >= 2 ? "偏热" : score.cold - score.heat >= 2 ? "偏寒" : "寒热不明";
   const interiorExterior = score.interior - score.exterior >= 2 ? "偏里" : score.exterior - score.interior >= 2 ? "偏表" : "表里不明";
   const defExcess = score.deficiency - score.excess >= 2 ? "偏虚" : score.excess - score.deficiency >= 2 ? "偏实" : "虚实夹杂";
 
-  // yin/yang summary (simple)
   let yinYang = "阴阳不明";
   if (coldHeat === "偏寒" && defExcess === "偏虚") yinYang = "偏阳虚";
   else if (coldHeat === "偏热" && defExcess === "偏虚") yinYang = "偏阴虚/虚热";
@@ -136,11 +159,10 @@ function analyzeEightPrinciples(caseInput) {
 }
 
 // ---------------------------
-// Stage 2: tag scoring (symptom rules + combo rules), then constrain by eight principles
+// Stage 2: tag scoring + combo rules
 // ---------------------------
 function computeTagScores(symptomIds) {
   const scores = {};
-
   const ruleBySymptom = new Map();
   for (const r of SYMPTOM_TAG_RULES) ruleBySymptom.set(r.symptomId, r);
 
@@ -151,7 +173,6 @@ function computeTagScores(symptomIds) {
     for (const t of (r.assist || [])) scores[t] = (scores[t] || 0) + 1;
   }
 
-  // combo rules
   for (const cr of COMBO_RULES) {
     const ok = (cr.whenAll || []).every((x) => symptomIds.includes(x));
     if (!ok) continue;
@@ -165,35 +186,28 @@ function computeTagScores(symptomIds) {
 
 function constrainByEightPrinciples(tagScores, eight) {
   const scores = { ...tagScores };
-
-  const penalize = (tags, delta) => {
+  const adjust = (tags, delta) => {
     for (const t of tags) scores[t] = (scores[t] || 0) + delta;
   };
 
-  // Strong direction constraints (coarse)
   if (eight.coldHeat === "偏寒") {
-    penalize(["阴虚火旺","里热偏盛","热结肠腑"], -3);
-    // support cold/yang xu
-    penalize(["阳虚体质","肾阳不足","寒湿困脾","寒凝胞宫"], +1);
+    adjust(["阴虚火旺","里热偏盛","热结肠腑"], -3);
+    adjust(["阳虚体质","肾阳不足","寒湿困脾"], +1);
   }
   if (eight.coldHeat === "偏热") {
-    penalize(["阳虚体质","肾阳不足","寒湿困脾","寒凝胞宫"], -2);
-    penalize(["里热偏盛","湿热下注","阴虚火旺","热结肠腑"], +1);
+    adjust(["阳虚体质","肾阳不足","寒湿困脾"], -2);
+    adjust(["里热偏盛","湿热下注","阴虚火旺","热结肠腑"], +1);
   }
-
   if (eight.defExcess === "偏虚") {
-    penalize(["气血不足","脾气虚弱","脾胃虚弱","肾阳不足","肾阴不足"], +1);
+    adjust(["气血不足","脾气虚弱","肾阳不足","肾阴不足","心气不足"], +1);
   }
   if (eight.defExcess === "偏实") {
-    penalize(["食滞胃肠","痰浊中阻","湿阻中焦","血瘀内阻","气滞"], +1);
+    adjust(["痰热壅肺","寒湿困脾","里热偏盛"], +1);
   }
 
   return scores;
 }
 
-// ---------------------------
-// Build base result
-// ---------------------------
 function buildBaseResult(tagScores) {
   const entries = Object.entries(tagScores).sort((a, b) => b[1] - a[1]);
   const top = entries.slice(0, 3);
@@ -211,7 +225,6 @@ function buildBaseResult(tagScores) {
   const principleList = [];
   const acuList = [];
   const herbList = [];
-
   for (const [t] of top) {
     const tpl = TAG_TREATMENT[t];
     if (!tpl) continue;
@@ -246,17 +259,14 @@ function buildBaseResult(tagScores) {
   };
 }
 
-// ---------------------------
-// AI note (optional)
-// ---------------------------
 async function attachAINotes(baseResult, caseInput) {
-  if (!process.env.OPENAI_API_KEY) {
-    return { ...baseResult, aiError: "后端未配置 OPENAI_API_KEY，AI 说明暂不可用。" };
+  if (!OPENAI_KEY) {
+    return { ...baseResult, aiError: "后端未配置 OPENAI_API_KEY/KEYFORTCM，AI 说明暂不可用。" };
   }
 
   try {
     const lang = normalizeLang(caseInput.lang);
-    const symptomIds = (caseInput.symptoms || []).map((x) => x && x.id).filter(Boolean);
+    const symptomIds = normalizeSymptomIds(caseInput);
     const namesZh = symptomIds.map((id) => symptomById.get(id)?.zh).filter(Boolean);
     const namesEn = symptomIds.map((id) => symptomById.get(id)?.en).filter(Boolean);
 
@@ -265,6 +275,7 @@ async function attachAINotes(baseResult, caseInput) {
       : (namesZh.length ? namesZh.join("、") : "（已选症状）");
 
     const ep = caseInput._eightPrinciplesText || "";
+
     const promptZh = `
 你是一位有多年临床经验的中医师兼针灸师。请用不超过180字的简体中文，向普通病人解释：
 - 症状：${mainSymptoms}
@@ -279,7 +290,8 @@ You are an experienced TCM clinician/acupuncturist. Write <=120 words in English
 - Symptoms: ${mainSymptoms}
 - Eight Principles tendency: ${ep}
 - Pattern hints: ${(baseResult.topTags || []).join(", ")}
-Constraints: use "may/possibly/tend to" only; no definitive diagnosis; no formula/herb/acupoint names; end with a safety line: "This is a general explanation only and not a diagnosis or medical advice. Seek care if unwell."
+Constraints: use "may/possibly/tend to" only; no definitive diagnosis; no formula/herb/acupoint names; end with:
+"This is a general explanation only and not a diagnosis or medical advice. Seek care if unwell."
 Output only the paragraph.
 `.trim();
 
@@ -289,7 +301,7 @@ Output only the paragraph.
     });
 
     const aiText = (response.output_text || "").trim();
-    return { ...baseResult, aiNotes: aiText || "（AI 暂不可用）" };
+    return { ...baseResult, aiNotes: aiText || (lang === "en" ? "(AI unavailable)" : "（AI 暂不可用）") };
   } catch (err) {
     return { ...baseResult, aiError: "AI 说明生成失败：" + (err?.message || String(err)) };
   }
@@ -309,10 +321,7 @@ export default async function handler(req, res) {
   try {
     const caseInput = req.body || {};
     const lang = normalizeLang(caseInput.lang);
-
-    const symptomIds = Array.isArray(caseInput.symptoms)
-      ? caseInput.symptoms.map((x) => x && x.id).filter(Boolean)
-      : [];
+    const symptomIds = normalizeSymptomIds(caseInput);
 
     if (symptomIds.length < 2) {
       const base = {
@@ -331,16 +340,11 @@ export default async function handler(req, res) {
       return res.status(200).json(base);
     }
 
-    // Stage 1: eight principles
     const eight = analyzeEightPrinciples(caseInput);
-
-    // Stage 2: tag scores with constraints
     const rawTagScores = computeTagScores(symptomIds);
     const constrainedScores = constrainByEightPrinciples(rawTagScores, eight.eightPrinciples);
-
     const baseResult = buildBaseResult(constrainedScores);
 
-    // attach for AI prompt
     const epText = `${eight.eightPrinciples.coldHeat}/${eight.eightPrinciples.interiorExterior}/${eight.eightPrinciples.defExcess}/${eight.eightPrinciples.yinYang}`;
     const caseWithEight = { ...caseInput, _eightPrinciplesText: epText };
 
@@ -357,3 +361,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server error", detail: err?.message || String(err) });
   }
 }
+
