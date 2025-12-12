@@ -1,4 +1,4 @@
-// pages/api/analyze.js
+// pages/api/analyze.js//
 import OpenAI from "openai";
 import {
   SYMPTOMS,
