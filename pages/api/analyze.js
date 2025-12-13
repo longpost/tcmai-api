@@ -4,12 +4,12 @@ import {
   SYMPTOMS,
   SYMPTOM_TAG_RULES,
   COMBO_RULES,
+  TAG_LABELS,
   TAG_EXPLANATIONS,
   TAG_TREATMENT
 } from "../../lib/data";
 
 const OPENAI_KEY = process.env.OPENAI_API_KEY || process.env.KEYFORTCM || "";
-
 const client = new OpenAI({ apiKey: OPENAI_KEY });
 
 // ---------------------------
@@ -33,13 +33,24 @@ function tBi(maybeBi, lang) {
   return safeStr(maybeBi[lang]) || safeStr(maybeBi.zh) || safeStr(maybeBi.en) || "";
 }
 
+function titleCase(s) {
+  return (s || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ""))
+    .join(" ");
+}
+
+// ✅ tag display name (keeps Chinese key stable internally; UI can show EN cleanly)
 function tagName(tag, lang) {
-  // 这里你如果未来想显示“英文证素名”，可以做映射；现在先保持 tag 原样（中文证素）
-  // 但英文 UI 里我们会让 Pattern 也用英文“解释句”，tag 名仍可保留中文（或你后续加 tag->enName）
-  // 为了“全英文”，这里给一个默认的英文化：直接用英文解释标题格式
-  // 最稳做法：你自己维护 TAG_NAME_EN；现在先保留 tag（不影响“全英文句子”，但 Pattern 会含中文tag会不爽）
-  // -> 我在下面 buildBaseResult 里给了 “patternLabels” 英文化，不靠 tag 名。
-  return tag;
+  if (lang === "zh") return tag;
+  const hit = TAG_LABELS?.[tag];
+  if (hit?.en) return hit.en;
+  // fallback: if it's already english-ish, title-case it; otherwise keep original
+  const hasAscii = /[A-Za-z]/.test(tag);
+  return hasAscii ? titleCase(tag) : tag;
 }
 
 // ✅ 输入兼容：支持 {id} 或 {symptom:"中文名"} 或 {symptom:"English"}
@@ -61,7 +72,8 @@ function normalizeSymptomIds(caseInput) {
       if (hit?.id) out.push(hit.id);
     }
   }
-  return out;
+  // de-dup while preserving order
+  return [...new Set(out)];
 }
 
 // ---------------------------
@@ -103,25 +115,29 @@ const EP_TEXT = {
 };
 
 function epLabel(lang, key) {
-  return EP_TEXT[lang][key] || key;
+  return EP_TEXT[lang]?.[key] || key;
 }
 
 // ---------------------------
 // Stage 1: Eight Principles scoring
+// Also returns stable keys for downstream constraints (better for expansion)
 // ---------------------------
 function analyzeEightPrinciples(caseInput, lang) {
   const evidence = [];
   const score = {
-    cold: 0, heat: 0,
-    exterior: 0, interior: 0,
-    deficiency: 0, excess: 0
+    cold: 0,
+    heat: 0,
+    exterior: 0,
+    interior: 0,
+    deficiency: 0,
+    excess: 0
   };
 
   const symptomIds = normalizeSymptomIds(caseInput);
 
   const add = (k, n, whyZh, whyEn) => {
     score[k] += n;
-    const why = (lang === "en" ? whyEn : whyZh);
+    const why = lang === "en" ? whyEn : whyZh;
     evidence.push(`${why} → ${k} ${n > 0 ? "+" + n : n}`);
   };
 
@@ -144,7 +160,7 @@ function analyzeEightPrinciples(caseInput, lang) {
   if (duration === "acute") add("exterior", 1, "急性病程", "Acute course");
   if (duration === "chronic") add("interior", 2, "慢性病程", "Chronic course");
 
-  const interiorClues = ["constipation","loose_stool","short_red_urine","clear_long_urine"];
+  const interiorClues = ["constipation", "loose_stool", "short_red_urine", "clear_long_urine"];
   if (symptomIds.some((x) => interiorClues.includes(x))) {
     add("interior", 2, "消化/二便相关症状", "Digestion/stool/urination-related symptoms");
   }
@@ -199,30 +215,37 @@ function analyzeEightPrinciples(caseInput, lang) {
   if (pulseShape === "thin") add("deficiency", 2, "脉细（偏虚）", "Thin pulse (often deficiency)");
   if (pulseShape === "slippery") add("excess", 1, "脉滑（痰湿偏实）", "Slippery pulse (often phlegm/damp)");
 
-  const coldHeat =
-    score.heat - score.cold >= 2 ? epLabel(lang, "heat") :
-    score.cold - score.heat >= 2 ? epLabel(lang, "cold") :
-    epLabel(lang, "unclearCH");
+  // stable keys + labels
+  const chKey =
+    score.heat - score.cold >= 2 ? "heat" :
+    score.cold - score.heat >= 2 ? "cold" :
+    "unclearCH";
 
-  const interiorExterior =
-    score.interior - score.exterior >= 2 ? epLabel(lang, "interior") :
-    score.exterior - score.interior >= 2 ? epLabel(lang, "exterior") :
-    epLabel(lang, "unclearIE");
+  const ieKey =
+    score.interior - score.exterior >= 2 ? "interior" :
+    score.exterior - score.interior >= 2 ? "exterior" :
+    "unclearIE";
 
-  const defExcess =
-    score.deficiency - score.excess >= 2 ? epLabel(lang, "deficiency") :
-    score.excess - score.deficiency >= 2 ? epLabel(lang, "excess") :
-    epLabel(lang, "mixedDE");
+  const deKey =
+    score.deficiency - score.excess >= 2 ? "deficiency" :
+    score.excess - score.deficiency >= 2 ? "excess" :
+    "mixedDE";
 
-  let yinYang = epLabel(lang, "yyUnclear");
-  if (coldHeat === epLabel(lang, "cold") && defExcess === epLabel(lang, "deficiency")) yinYang = epLabel(lang, "yyYangDef");
-  else if (coldHeat === epLabel(lang, "heat") && defExcess === epLabel(lang, "deficiency")) yinYang = epLabel(lang, "yyYinDefHeat");
-  else if (coldHeat === epLabel(lang, "heat") && defExcess === epLabel(lang, "excess")) yinYang = epLabel(lang, "yyYangExHeat");
-  else if (coldHeat === epLabel(lang, "cold") && defExcess === epLabel(lang, "excess")) yinYang = epLabel(lang, "yyColdEx");
+  let yyKey = "yyUnclear";
+  if (chKey === "cold" && deKey === "deficiency") yyKey = "yyYangDef";
+  else if (chKey === "heat" && deKey === "deficiency") yyKey = "yyYinDefHeat";
+  else if (chKey === "heat" && deKey === "excess") yyKey = "yyYangExHeat";
+  else if (chKey === "cold" && deKey === "excess") yyKey = "yyColdEx";
 
   return {
     score,
-    eightPrinciples: { coldHeat, interiorExterior, defExcess, yinYang },
+    keys: { chKey, ieKey, deKey, yyKey },
+    eightPrinciples: {
+      coldHeat: epLabel(lang, chKey),
+      interiorExterior: epLabel(lang, ieKey),
+      defExcess: epLabel(lang, deKey),
+      yinYang: epLabel(lang, yyKey)
+    },
     evidence
   };
 }
@@ -253,26 +276,26 @@ function computeTagScores(symptomIds) {
   return scores;
 }
 
-function constrainByEightPrinciples(tagScores, eight) {
+function constrainByEightPrinciples(tagScores, epKeys) {
   const scores = { ...tagScores };
   const adjust = (tags, delta) => {
     for (const t of tags) scores[t] = (scores[t] || 0) + delta;
   };
 
-  // We constrain using Chinese tag keys (stable). This is internal scoring only.
-  if (eight.coldHeat.includes("Cold") || eight.coldHeat.includes("偏寒")) {
-    adjust(["阴虚火旺","里热偏盛","热结肠腑"], -3);
-    adjust(["阳虚体质","肾阳不足","寒湿困脾"], +1);
+  // Constrain using stable EP keys (not string includes)
+  if (epKeys.chKey === "cold") {
+    adjust(["阴虚火旺", "里热偏盛", "热结肠腑"], -3);
+    adjust(["阳虚体质", "肾阳不足", "寒湿困脾"], +1);
   }
-  if (eight.coldHeat.includes("Heat") || eight.coldHeat.includes("偏热")) {
-    adjust(["阳虚体质","肾阳不足","寒湿困脾"], -2);
-    adjust(["里热偏盛","湿热下注","阴虚火旺","热结肠腑"], +1);
+  if (epKeys.chKey === "heat") {
+    adjust(["阳虚体质", "肾阳不足", "寒湿困脾"], -2);
+    adjust(["里热偏盛", "湿热下注", "阴虚火旺", "热结肠腑"], +1);
   }
-  if (eight.defExcess.includes("Deficiency") || eight.defExcess.includes("偏虚")) {
-    adjust(["气血不足","脾气虚弱","肾阳不足","肾阴不足","心气不足"], +1);
+  if (epKeys.deKey === "deficiency") {
+    adjust(["气血不足", "脾气虚弱", "肾阳不足", "肾阴不足", "心气不足"], +1);
   }
-  if (eight.defExcess.includes("Excess") || eight.defExcess.includes("偏实")) {
-    adjust(["痰热壅肺","寒湿困脾","里热偏盛"], +1);
+  if (epKeys.deKey === "excess") {
+    adjust(["痰热壅肺", "寒湿困脾", "里热偏盛"], +1);
   }
 
   return scores;
@@ -287,7 +310,14 @@ function buildBaseResult(tagScores, lang) {
   const explanationParts = [];
   for (const [t] of top) {
     const exp = tBi(TAG_EXPLANATIONS[t], lang);
-    if (exp) explanationParts.push(`【${lang === "en" ? "Hint" : "提示"}: ${t}】 ${exp}`);
+    if (!exp) continue;
+
+    const displayTag = tagName(t, lang);
+    if (lang === "en") {
+      explanationParts.push(`Hint (${displayTag}): ${exp}`);
+    } else {
+      explanationParts.push(`【提示：${displayTag}】${exp}`);
+    }
   }
 
   const explanation = explanationParts.length
@@ -315,7 +345,9 @@ function buildBaseResult(tagScores, lang) {
     ? principleList.join(" ")
     : (lang === "en"
         ? "Consider a direction based on the strongest pattern hints, but a clinician’s evaluation is required."
-        : (topTags.length ? `可从 ${topTags.join("、")} 等方向粗略考虑治法，具体仍需面诊综合判断。` : "建议先完善关键证据（舌/脉/寒热虚实/病程），再做辨证复核。"));
+        : (topTags.length
+            ? `可从 ${topTags.map((t) => tagName(t, "zh")).join("、")} 等方向粗略考虑治法，具体仍需面诊综合判断。`
+            : "建议先完善关键证据（舌/脉/寒热虚实/病程），再做辨证复核。"));
 
   const acupuncture = acuList.length
     ? acuList.join(" ")
@@ -329,26 +361,26 @@ function buildBaseResult(tagScores, lang) {
         ? "No herbal prescription here. Herbal planning requires licensed clinical assessment."
         : "方药配伍必须由合格中医师结合舌脉与体质后决定，本系统不提供处方。");
 
-  // Pattern line: for EN we keep tag keys but keep everything else EN (you can later add tag->enName mapping if you want)
-  const title = (lang === "en" ? "Pattern review (for learning)" : "辨证复核示意（自用）");
+  const title = lang === "en" ? "Pattern review (for learning)" : "辨证复核示意（自用）";
   const pattern =
     topTags.length
       ? (lang === "en"
-          ? `Tendency: ${topTags.join(", ")} (illustrative; not a diagnosis)`
-          : `倾向：${topTags.join("、")}（示意，不作诊断）`)
+          ? `Tendency: ${topTags.map((t) => tagName(t, "en")).join(", ")} (illustrative; not a diagnosis)`
+          : `倾向：${topTags.map((t) => tagName(t, "zh")).join("、")}（示意，不作诊断）`)
       : (lang === "en"
           ? "No stable tendency formed (illustrative)"
           : "未形成稳定倾向（示意）");
 
   const warning =
-    (lang === "en"
+    lang === "en"
       ? "For learning/self-check only. Not a diagnosis or medical advice."
-      : "本结果仅用于学习与自我复核，不构成诊断或处方依据。");
+      : "本结果仅用于学习与自我复核，不构成诊断或处方依据。";
 
   return {
     title,
     pattern,
     topTags,
+    topTagsDisplay: topTags.map((t) => tagName(t, lang)),
     rawScores: tagScores,
     explanation,
     principle,
@@ -369,17 +401,24 @@ async function attachAINotes(baseResult, caseInput) {
     const namesZh = symptomIds.map((id) => symptomById.get(id)?.zh).filter(Boolean);
     const namesEn = symptomIds.map((id) => symptomById.get(id)?.en).filter(Boolean);
 
-    const mainSymptoms = lang === "en"
-      ? (namesEn.length ? namesEn.join(", ") : "(selected symptoms)")
-      : (namesZh.length ? namesZh.join("、") : "（已选症状）");
+    const mainSymptoms =
+      lang === "en"
+        ? (namesEn.length ? namesEn.join(", ") : "(selected symptoms)")
+        : (namesZh.length ? namesZh.join("、") : "（已选症状）");
 
-    const ep = caseInput._eightPrinciplesText || "";
+    const ep = safeStr(caseInput._eightPrinciplesText);
+
+    // Use display names in AI prompt for EN so it stays clean
+    const tagsForPrompt =
+      lang === "en"
+        ? (baseResult.topTags || []).map((t) => tagName(t, "en")).join(", ")
+        : (baseResult.topTags || []).join("、");
 
     const promptZh = `
 你是一位有多年临床经验的中医师兼针灸师。请用不超过180字的简体中文，向普通病人解释：
 - 症状：${mainSymptoms}
 - 八纲倾向：${ep}
-- 系统倾向证素：${(baseResult.topTags || []).join("、")}
+- 系统倾向证素：${tagsForPrompt}
 要求：只能说“可能/倾向/可以从…考虑”，不下诊断；不报方名/药名/穴位名；结尾必须提醒：仅作一般性说明，不能作为诊断或用药依据，如有不适请及时就医。
 只输出一段话。
 `.trim();
@@ -388,7 +427,7 @@ async function attachAINotes(baseResult, caseInput) {
 You are an experienced TCM clinician/acupuncturist. Write <=120 words in English for a lay patient:
 - Symptoms: ${mainSymptoms}
 - Eight Principles tendency: ${ep}
-- Pattern hints: ${(baseResult.topTags || []).join(", ")}
+- Pattern hints: ${tagsForPrompt}
 Constraints: use "may/possibly/tend to" only; no definitive diagnosis; no formula/herb/acupoint names; end with:
 "This is a general explanation only and not a diagnosis or medical advice. Seek care if unwell."
 Output only the paragraph.
@@ -423,31 +462,32 @@ export default async function handler(req, res) {
     const symptomIds = normalizeSymptomIds(caseInput);
 
     if (symptomIds.length < 2) {
-      const base = (lang === "en")
-        ? {
-            title: "Not enough information",
-            pattern: "Select more symptoms for a meaningful self-check.",
-            explanation: "In practice, pattern differentiation requires multiple key symptoms plus tongue/pulse and course.",
-            principle: "Add more findings and try again.",
-            acupuncture: "No acupoint advice here.",
-            herbal: "No herbal advice here.",
-            warning: "Self-check only. Not a diagnosis or medical advice."
-          }
-        : {
-            title: "信息不足",
-            pattern: "症状过少，难以做稳定复核。",
-            explanation: "临床辨证通常需要多条主症与兼症，并结合舌象脉象与病程综合判断。",
-            principle: "建议补充症状与舌脉信息后再试。",
-            acupuncture: "此时不宜给出取穴建议。",
-            herbal: "此时不宜给出用药建议。",
-            warning: "仅用于自我复核学习，不作诊断处方。"
-          };
+      const base =
+        lang === "en"
+          ? {
+              title: "Not enough information",
+              pattern: "Select more symptoms for a meaningful self-check.",
+              explanation: "In practice, pattern differentiation requires multiple key symptoms plus tongue/pulse and course.",
+              principle: "Add more findings and try again.",
+              acupuncture: "No acupoint advice here.",
+              herbal: "No herbal advice here.",
+              warning: "Self-check only. Not a diagnosis or medical advice."
+            }
+          : {
+              title: "信息不足",
+              pattern: "症状过少，难以做稳定复核。",
+              explanation: "临床辨证通常需要多条主症与兼症，并结合舌象脉象与病程综合判断。",
+              principle: "建议补充症状与舌脉信息后再试。",
+              acupuncture: "此时不宜给出取穴建议。",
+              herbal: "此时不宜给出用药建议。",
+              warning: "仅用于自我复核学习，不作诊断处方。"
+            };
       return res.status(200).json(base);
     }
 
     const eight = analyzeEightPrinciples(caseInput, lang);
     const rawTagScores = computeTagScores(symptomIds);
-    const constrainedScores = constrainByEightPrinciples(rawTagScores, eight.eightPrinciples);
+    const constrainedScores = constrainByEightPrinciples(rawTagScores, eight.keys);
 
     const baseResult = buildBaseResult(constrainedScores, lang);
 
@@ -460,6 +500,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ...enriched,
       eightPrinciples: eight.eightPrinciples,
+      eightKeys: eight.keys,
       eightScores: eight.score,
       eightEvidence: eight.evidence
     });
@@ -468,5 +509,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server error", detail: err?.message || String(err) });
   }
 }
-
 
